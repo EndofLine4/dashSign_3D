@@ -18,29 +18,27 @@
 //   16 = ring tip
 //   18 = pinky PIP
 //   20 = pinky tip
+//
+// Speed gestures added:
+//   FAST — both index and middle extended (V/peace shape), ring and pinky curled
+//   SLOW — open flat hand pushed forward (same as STOP but with downward wrist offset)
+//          Implemented as STOP held low in frame (wrist y > 0.55) to distinguish
+//          from a generic open-hand stop
 // =============================================================
 
 // ── Module-level state ──────────────────────────────────────
-// currentLandmarks: updated every MediaPipe frame
-// lastDetectedGesture / gestureConfidenceCount: stability filter
-// A gesture must match for CONFIDENCE_THRESHOLD consecutive frames
-// before it's accepted — reduces false positives from hand jitter.
 let currentLandmarks       = null;
 let lastDetectedGesture    = null;
 let gestureConfidenceCount = 0;
 const CONFIDENCE_THRESHOLD = 2;
 
-// Callbacks registered by ui.js so gestures can trigger game events
-// without gestures.js needing to know about the game state
-let onGestureConfirmed = null;  // called with gesture name when confirmed
-let onGestureAttempt   = null;  // called every frame with current best guess
+let onGestureConfirmed = null;
+let onGestureAttempt   = null;
 
 
 // =============================================================
 // initMediaPipe
 // Starts the webcam and feeds frames to MediaPipe Hands.
-// MediaPipe runs entirely in the browser — no server needed.
-// The onResults callback updates currentLandmarks every frame.
 // =============================================================
 export function initMediaPipe(handCanvasEl) {
   const handCtx = handCanvasEl.getContext('2d');
@@ -53,25 +51,20 @@ export function initMediaPipe(handCanvasEl) {
 
   hands.setOptions({
     maxNumHands: 1,
-    modelComplexity: 0,           // 0 = lite model, fast enough for 60fps
+    modelComplexity: 0,
     minDetectionConfidence: 0.6,
     minTrackingConfidence: 0.5
   });
 
   hands.onResults(function(results) {
-    // Update the current landmarks from MediaPipe's output
     if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
       currentLandmarks = results.multiHandLandmarks[0];
     } else {
       currentLandmarks = null;
     }
-
-    // Draw yellow dots on the hand overlay canvas so the player
-    // can see their hand is being tracked
     drawHandOverlay(handCtx, handCanvasEl, results);
   });
 
-  // Request webcam access and start feeding frames to MediaPipe
   navigator.mediaDevices.getUserMedia({ video: true }).then(function(stream) {
     const webcamVideo = document.getElementById('webcam');
     webcamVideo.srcObject = stream;
@@ -93,9 +86,6 @@ export function initMediaPipe(handCanvasEl) {
 
 // =============================================================
 // registerGestureCallbacks
-// ui.js calls this to hook into gesture events without
-// gestures.js needing to import anything from ui.js.
-// This keeps the dependency flow one-directional.
 // =============================================================
 export function registerGestureCallbacks(onConfirmed, onAttempt) {
   onGestureConfirmed = onConfirmed;
@@ -105,8 +95,7 @@ export function registerGestureCallbacks(onConfirmed, onAttempt) {
 
 // =============================================================
 // checkGesture
-// Called from main.js every frame while a sign-it popup is open.
-// gestureName: which gesture to look for (e.g. 'snow', 'open')
+// Called from main.js every frame while a popup is open.
 // Uses confidence filtering to require N matching frames.
 // =============================================================
 export function checkGesture(gestureName) {
@@ -118,7 +107,6 @@ export function checkGesture(gestureName) {
     if (lastDetectedGesture === gestureName) {
       gestureConfidenceCount++;
       if (gestureConfidenceCount >= CONFIDENCE_THRESHOLD) {
-        // Reset counter so it doesn't keep firing after first confirm
         gestureConfidenceCount = 0;
         lastDetectedGesture    = null;
         if (onGestureConfirmed) onGestureConfirmed(gestureName);
@@ -141,9 +129,49 @@ export function checkGesture(gestureName) {
 
 
 // =============================================================
+// checkSpeedGesture
+// Special-purpose polling function called every frame during
+// 'playing' state — separate from checkGesture so speed signs
+// never interfere with obstacle sign matching.
+// Returns 'fast', 'slow', or null.
+// Uses its own independent confidence counter so obstacle
+// challenges and speed gestures don't share state.
+// =============================================================
+let lastSpeedGesture    = null;
+let speedConfidenceCount = 0;
+const SPEED_CONFIDENCE  = 3;  // slightly higher bar than obstacles
+
+export function checkSpeedGesture() {
+  if (!currentLandmarks) return null;
+
+  const isFast = gestureFast(currentLandmarks);
+  const isSlow = gestureSlow(currentLandmarks);
+
+  const detected = isFast ? 'fast' : isSlow ? 'slow' : null;
+
+  if (detected) {
+    if (lastSpeedGesture === detected) {
+      speedConfidenceCount++;
+      if (speedConfidenceCount >= SPEED_CONFIDENCE) {
+        speedConfidenceCount = 0;
+        lastSpeedGesture     = null;
+        return detected;
+      }
+    } else {
+      lastSpeedGesture     = detected;
+      speedConfidenceCount = 1;
+    }
+  } else {
+    lastSpeedGesture     = null;
+    speedConfidenceCount = 0;
+  }
+
+  return null;
+}
+
+
+// =============================================================
 // checkDifficultyGesture
-// Special case for the MORE/NO difficulty choice.
-// Checks both gestures and returns 'more', 'no', or null.
 // =============================================================
 export function checkDifficultyGesture() {
   if (!currentLandmarks) return null;
@@ -155,12 +183,12 @@ export function checkDifficultyGesture() {
 
 // =============================================================
 // resetGestureState
-// Called when a popup closes so partial gesture matches don't
-// carry over into the next interaction.
 // =============================================================
 export function resetGestureState() {
   lastDetectedGesture    = null;
   gestureConfidenceCount = 0;
+  lastSpeedGesture       = null;
+  speedConfidenceCount   = 0;
 }
 
 
@@ -181,23 +209,20 @@ export function recognizeGesture(gestureName, landmarks) {
   if (gestureName === 'no')    return gestureNo(landmarks);
   if (gestureName === 'open')  return gestureOpen(landmarks);
   if (gestureName === 'close') return gestureClose(landmarks);
+  if (gestureName === 'fast')  return gestureFast(landmarks);
+  if (gestureName === 'slow')  return gestureSlow(landmarks);
   return false;
 }
 
 
 // ── Gesture detection functions ────────────────────────────
-// Each function receives the 21-landmark array from MediaPipe.
-// In MediaPipe coords: x and y are 0-1 normalized to the video
-// frame. Y increases DOWNWARD, so tip.y < base.y means the
-// fingertip is HIGHER than the knuckle = finger is extended.
+// In MediaPipe coords: y INCREASES downward.
+// tip.y < base.y = finger is UP (extended).
 
-// PLAY: reuses GO or OUT — any "forward" hand shape starts the game
 export function gesturePlay(landmarks) {
   return gestureGo(landmarks) || gestureOut(landmarks);
 }
 
-// SNOW: open spread hand — all four fingertips above knuckles,
-// thumb spread away from index finger
 export function gestureSnow(landmarks) {
   const tips  = [8, 12, 16, 20];
   const bases = [6, 10, 14, 18];
@@ -208,8 +233,6 @@ export function gestureSnow(landmarks) {
   return allExtended && thumbSpread;
 }
 
-// STOP: flat open hand — same check as snow but without the
-// thumb spread requirement (thumb can be closer in)
 export function gestureStop(landmarks) {
   const tips  = [8, 12, 16, 20];
   const bases = [6, 10, 14, 18];
@@ -218,7 +241,6 @@ export function gestureStop(landmarks) {
   });
 }
 
-// GO: index finger extended upward, other three fingers curled
 export function gestureGo(landmarks) {
   const indexExtended = landmarks[8].y  < landmarks[6].y;
   const middleCurled  = landmarks[12].y > landmarks[10].y;
@@ -227,8 +249,6 @@ export function gestureGo(landmarks) {
   return indexExtended && middleCurled && ringCurled && pinkyCurled;
 }
 
-// HELP: closed fist — all four fingertips curled below PIPs,
-// thumb tucked close to index base
 export function gestureHelp(landmarks) {
   const allCurled = [8, 12, 16, 20].every(function(tip) {
     return landmarks[tip].y > landmarks[tip - 2].y;
@@ -237,9 +257,6 @@ export function gestureHelp(landmarks) {
   return allCurled && thumbIn;
 }
 
-// OUT: loose open hand — at least 3 of 4 fingers extended,
-// thumb away from index. More lenient than STOP to account
-// for natural hand variation when signing outward.
 export function gestureOut(landmarks) {
   const tips  = [8, 12, 16, 20];
   const bases = [6, 10, 14, 18];
@@ -251,7 +268,6 @@ export function gestureOut(landmarks) {
   return extendedCount >= 3 && thumbAway;
 }
 
-// LEFT: index pointing left relative to wrist, others curled
 export function gestureLeft(landmarks) {
   const indexExtended = landmarks[8].y < landmarks[6].y;
   const othersCurled  = landmarks[12].y > landmarks[10].y &&
@@ -261,7 +277,6 @@ export function gestureLeft(landmarks) {
   return indexExtended && othersCurled && pointingLeft;
 }
 
-// RIGHT: index pointing right relative to wrist, others curled
 export function gestureRight(landmarks) {
   const indexExtended = landmarks[8].y < landmarks[6].y;
   const othersCurled  = landmarks[12].y > landmarks[10].y &&
@@ -271,8 +286,6 @@ export function gestureRight(landmarks) {
   return indexExtended && othersCurled && pointingRight;
 }
 
-// MORE: fingertips gathered close to thumb tip
-// (one-hand approximation of both hands tapping together)
 export function gestureMore(landmarks) {
   const thumbTip = landmarks[4];
   return [8, 12, 16, 20].every(function(i) {
@@ -280,8 +293,6 @@ export function gestureMore(landmarks) {
   });
 }
 
-// NO: index and middle extended together and close,
-// ring and pinky curled
 export function gestureNo(landmarks) {
   const indexExtended  = landmarks[8].y  < landmarks[6].y;
   const middleExtended = landmarks[12].y < landmarks[10].y;
@@ -294,8 +305,6 @@ export function gestureNo(landmarks) {
   return indexExtended && middleExtended && ringCurled && pinkyCurled && fingersClose;
 }
 
-// OPEN: spread hand — all fingers extended AND
-// thumb and pinky tips are far apart horizontally
 export function gestureOpen(landmarks) {
   const tips  = [8, 12, 16, 20];
   const bases = [6, 10, 14, 18];
@@ -306,8 +315,6 @@ export function gestureOpen(landmarks) {
   return allExtended && spread;
 }
 
-// CLOSE: compact hand — some fingers extended but
-// thumb and pinky tips are close together horizontally
 export function gestureClose(landmarks) {
   const tips  = [8, 12, 16, 20];
   const bases = [6, 10, 14, 18];
@@ -318,12 +325,42 @@ export function gestureClose(landmarks) {
   return someExtended && compact;
 }
 
+// FAST: index AND middle extended together (V / peace sign shape),
+// ring and pinky curled. This is distinct from GO (index only) and
+// NO (index + middle but close together) because the two fingers
+// are spread apart in a V shape — middle tip further from index tip.
+export function gestureFast(landmarks) {
+  const indexExtended  = landmarks[8].y  < landmarks[6].y;
+  const middleExtended = landmarks[12].y < landmarks[10].y;
+  const ringCurled     = landmarks[16].y > landmarks[14].y;
+  const pinkyCurled    = landmarks[20].y > landmarks[18].y;
+  // Fingers must be visibly spread apart (V shape, not grouped like NO)
+  const fingersSpread  = Math.hypot(
+    landmarks[8].x  - landmarks[12].x,
+    landmarks[8].y  - landmarks[12].y
+  ) > 0.08;
+  return indexExtended && middleExtended && ringCurled && pinkyCurled && fingersSpread;
+}
+
+// SLOW: flat open hand held LOW in the camera frame.
+// The wrist landmark (0) must be in the lower half of the frame
+// (y > 0.55) — player pushes palm downward rather than holding it
+// straight up. This distinguishes SLOW from STOP (which is held up).
+// All four fingers must be extended (same base check as STOP).
+export function gestureSlow(landmarks) {
+  const tips  = [8, 12, 16, 20];
+  const bases = [6, 10, 14, 18];
+  const allExtended = tips.every(function(tip, i) {
+    return landmarks[tip].y < landmarks[bases[i]].y;
+  });
+  // Wrist low in frame = hand pushed downward = "slow down" motion
+  const handLow = landmarks[0].y > 0.52;
+  return allExtended && handLow;
+}
+
 
 // =============================================================
 // drawHandOverlay
-// Draws yellow dots at each of the 21 hand landmark positions
-// on the handCanvas element so the player gets visual feedback
-// that their hand is being tracked during sign-it mode.
 // =============================================================
 function drawHandOverlay(handCtx, canvas, results) {
   handCtx.clearRect(0, 0, canvas.width, canvas.height);
