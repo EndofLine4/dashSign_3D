@@ -1,9 +1,7 @@
 // =============================================================
 // main.js
 // Entry point for DashSign 3D.
-// Owns the Three.js scene, camera, renderer, and game state.
-// Imports from road.js, car.js, obstacles.js, gestures.js,
-// and ui.js — each responsible for one area of the game.
+// Owns the Three.js scene, camera, renderer, and all game state.
 //
 // Game state machine:
 //   'login'      — login overlay visible, nothing running
@@ -13,11 +11,22 @@
 //   'lanePrompt' — barricade approaching, sign LEFT or RIGHT
 //   'difficulty' — more obstacles prompt active
 //   'paused'     — game frozen, no input processed
+//
+// Speed system:
+//   2.5s after driving starts, a non-blocking corner banner
+//   appears inviting the player to sign FAST.
+//   Speed is a lerp target — it accelerates and decelerates
+//   smoothly rather than snapping. Visual effects (fog, FOV,
+//   camera shake) reinforce the feeling of speed change.
+//   Score multiplier is 1.5x at fast speed (15pts vs 10pts).
+//   SLOW is always available once FAST has been signed.
+//   Speed resets to normal automatically when a popup opens
+//   so obstacle challenges stay fair regardless of speed.
 // =============================================================
 
 import * as THREE from 'three';
 
-import { createRoad, updateRoad, ROAD_LENGTH } from './road.js';
+import { createRoad, updateRoad }              from './road.js';
 import { createCar, updateCar, updateCamera }  from './car.js';
 import {
   OBSTACLE_TYPES,
@@ -27,8 +36,8 @@ import {
   boxesOverlap
 } from './obstacles.js';
 import {
-  initMediaPipe, checkGesture, checkDifficultyGesture,
-  resetGestureState, recognizeGesture
+  initMediaPipe, checkGesture, checkSpeedGesture,
+  checkDifficultyGesture, resetGestureState, recognizeGesture
 } from './gestures.js';
 import {
   initUI, updateHUD,
@@ -36,37 +45,30 @@ import {
   showLaneDodgePrompt, showMoreObstaclesPrompt, showFlashBanner,
   hideAllPopups, showHandCanvas, hideHandCanvas,
   setSignResult, setChoiceFeedback,
-  getDifficultyLocked, lockDifficulty,
-  setPauseButtonLabel
+  getDifficultyLocked, lockDifficulty, setPauseButtonLabel,
+  showSpeedPrompt, hideSpeedPrompt, showSlowHint, hideSlowHint
 } from './ui.js';
 
 
 // =============================================================
 // THREE.JS SCENE SETUP
-// Scene, camera, renderer, fog, and lights are created once
-// at module level. They don't change during gameplay.
 // =============================================================
 
 const scene = new THREE.Scene();
-
-// Fog makes the road fade into darkness at distance — free polish
 scene.fog = new THREE.Fog(0x0a0a14, 45, 130);
 scene.background = new THREE.Color(0x0a0a14);
 
-// PerspectiveCamera(fov, aspect, near, far)
-// fov=60 gives a natural driving perspective
 const camera = new THREE.PerspectiveCamera(60, innerWidth / innerHeight, 0.1, 200);
 camera.position.set(0, 4.5, 18);
 camera.lookAt(0, 0, 0);
 
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(innerWidth, innerHeight);
-renderer.setPixelRatio(Math.min(devicePixelRatio, 2)); // cap at 2x for performance
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type    = THREE.PCFSoftShadowMap;   // softer shadow edges
+renderer.shadowMap.type    = THREE.PCFSoftShadowMap;
 document.body.appendChild(renderer.domElement);
 
-// Resize handler — keeps canvas filling the window
 window.addEventListener('resize', function() {
   camera.aspect = innerWidth / innerHeight;
   camera.updateProjectionMatrix();
@@ -75,54 +77,35 @@ window.addEventListener('resize', function() {
 
 
 // ── Lighting ────────────────────────────────────────────────
-// Ambient: fills shadows so nothing is pure black
 const ambient = new THREE.AmbientLight(0xffffff, 0.45);
 scene.add(ambient);
 
-// Sun: main directional light, casts shadows
 const sun = new THREE.DirectionalLight(0xfff5e0, 1.2);
 sun.position.set(8, 24, 12);
-sun.castShadow              = true;
-sun.shadow.mapSize.width    = 1024;
-sun.shadow.mapSize.height   = 1024;
-sun.shadow.camera.near      = 0.5;
-sun.shadow.camera.far       = 80;
-sun.shadow.camera.left      = -20;
-sun.shadow.camera.right     = 20;
-sun.shadow.camera.top       = 20;
-sun.shadow.camera.bottom    = -20;
+sun.castShadow           = true;
+sun.shadow.mapSize.width = sun.shadow.mapSize.height = 1024;
+sun.shadow.camera.near   = 0.5;
+sun.shadow.camera.far    = 80;
+sun.shadow.camera.left   = sun.shadow.camera.bottom = -20;
+sun.shadow.camera.right  = sun.shadow.camera.top    =  20;
 scene.add(sun);
 
-// Fill: cool blue light from behind, adds depth
 const fill = new THREE.DirectionalLight(0x8ab4f8, 0.3);
 fill.position.set(-6, 6, -15);
 scene.add(fill);
 
 
 // ── Roadside scenery ────────────────────────────────────────
-// Simple tree shapes (cone on cylinder) along both road edges.
-// Static in the world — the road scrolling past them creates
-// the illusion of movement without needing to animate them.
 (function addTrees() {
   const trunkMat  = new THREE.MeshLambertMaterial({ color: 0x5c3d1e });
   const leavesMat = new THREE.MeshLambertMaterial({ color: 0x2d5a1b });
-
   for (let i = 0; i < 20; i++) {
     [-9, 9].forEach(function(side) {
-      const group = new THREE.Group();
-
-      const trunk = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.15, 0.22, 1.2, 6),
-        trunkMat
-      );
-      trunk.position.y = 0.6;
-
-      const leaves = new THREE.Mesh(
-        new THREE.ConeGeometry(0.85, 2.2, 7),
-        leavesMat
-      );
+      const group  = new THREE.Group();
+      const trunk  = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.22, 1.2, 6), trunkMat);
+      const leaves = new THREE.Mesh(new THREE.ConeGeometry(0.85, 2.2, 7), leavesMat);
+      trunk.position.y  = 0.6;
       leaves.position.y = 2.3;
-
       group.add(trunk, leaves);
       group.position.set(side, 0, -i * 9 - 5);
       scene.add(group);
@@ -133,56 +116,78 @@ scene.add(fill);
 
 // =============================================================
 // GAME STATE
-// All mutable game state lives here in main.js.
-// Other modules read/write state only through function args
-// or the callbacks registered in initUI.
 // =============================================================
 
-// Keyboard input — keys object is read every frame in updateCar
 const keys = {};
 document.addEventListener('keydown', function(e) { keys[e.key] = true; });
 document.addEventListener('keyup',   function(e) { keys[e.key] = false; });
 
-let gameState       = 'login';   // see state machine comment at top
-let score           = 0;
-let distance        = 0;
-let mudAvoidedCount = 0;         // tracks when to show difficulty prompt
-let bonusEnabled    = false;     // true after player signs MORE
-let askedForMore    = false;     // difficulty prompt shown only once
-let lanePromptLocked = false;    // prevents lane prompt firing twice
+let gameState        = 'login';
+let score            = 0;
+let distance         = 0;
+let mudAvoidedCount  = 0;
+let bonusEnabled     = false;
+let askedForMore     = false;
+let lanePromptLocked = false;
 
-// Flash banner timer — mud obstacle pre-flash
+// Flash banner
 let flashActive = false;
 let flashTimer  = 0;
-const FLASH_DURATION     = 120;  // frames at 60fps (~2 seconds)
-const NEXT_OBSTACLE_DELAY = 4000; // ms between obstacle spawns
-const POPUP_CLOSE_DELAY   = 500;  // ms before popup hides after resolve
-const ROAD_SPEED          = 0.18; // 3D units per frame
+const FLASH_DURATION      = 120;
+const NEXT_OBSTACLE_DELAY = 4000;
+const POPUP_CLOSE_DELAY   = 500;
 
-// Build world objects
+// ── Speed system state ──────────────────────────────────────
+// currentSpeed: the actual speed used this frame (lerped)
+// targetSpeed:  what we're lerping toward
+// SPEED_NORMAL: base road speed in 3D units per frame
+// SPEED_FAST:   2x normal
+// LERP_ACCEL:   how quickly speed increases (lower = smoother ramp-up)
+// LERP_DECEL:   how quickly speed decreases (faster decel feels more responsive)
+const SPEED_NORMAL  = 0.18;
+const SPEED_FAST    = 0.36;   // exactly 2x
+const LERP_ACCEL    = 0.018;  // ~1 second to reach full speed
+const LERP_DECEL    = 0.04;   // ~half second to slow down
+let   currentSpeed  = SPEED_NORMAL;
+let   targetSpeed   = SPEED_NORMAL;
+
+// Speed mode tracks whether FAST has been activated.
+// 'normal' | 'fast' — SLOW always returns to 'normal'
+let speedMode = 'normal';
+
+// Prompt shown 2.5s after driving starts, only once per session
+let speedPromptShown    = false;
+let speedPromptDismissed = false;
+let drivingStartTime    = 0;   // timestamp when gameState becomes 'playing'
+
+// Camera shake accumulator — applied at fast speed for physical feel
+let shakeAmount = 0;
+
+// FOV target — widens at fast speed for tunnel-vision effect
+const FOV_NORMAL = 60;
+const FOV_FAST   = 72;  // wider FOV feels faster
+let   targetFOV  = FOV_NORMAL;
+
+
+// ── World objects ───────────────────────────────────────────
 const roadTiles = createRoad(scene);
 const carGroup  = createCar(scene);
 
 
 // =============================================================
 // initUI CALLBACKS
-// These callbacks let ui.js trigger game events without
-// importing game state. main.js owns state, ui.js owns DOM.
 // =============================================================
 
 initUI({
-  // Called after successful login — show the PLAY sign prompt
   onLoginSuccess: function() {
     gameState = 'startSign';
     showStartSignPopup();
   },
 
-  // Called when player presses S, G, or P during choice mode
   onChoiceAnswer: function(key) {
     if (gameState !== 'stuck') return;
     const type = getActiveObstacleType();
     if (!type || type.mechanic !== 'choice') return;
-
     if (key === type.correctKey) {
       resolveObstacle(true);
     } else {
@@ -190,36 +195,32 @@ initUI({
     }
   },
 
-  // Called when difficulty gesture (MORE or NO) is confirmed
   onDifficultyChoice: function(choice) {
     if (gameState !== 'difficulty') return;
-    if (choice === 'more') {
-      bonusEnabled = true;
-      setSignResult('Nice! More obstacles enabled.', true);
-    } else {
-      setSignResult('Standard obstacles.', true);
-    }
+    bonusEnabled = choice === 'more';
+    setSignResult(
+      choice === 'more' ? 'Nice! More obstacles enabled.' : 'Standard obstacles.',
+      true
+    );
     setTimeout(finishDifficultyPrompt, 900);
   },
 
-  // Called when pause button is clicked
   onPause: function() {
     if (gameState === 'paused') {
       gameState = previousState;
     } else {
       previousState = gameState;
-      gameState = 'paused';
+      gameState     = 'paused';
     }
     setPauseButtonLabel(gameState === 'paused');
   }
 });
 
-// Store state before pause so we can restore it on resume
 let previousState = 'playing';
 
 
 // =============================================================
-// MediaPipe and gesture setup
+// MediaPipe setup
 // =============================================================
 
 const handCanvasEl = document.getElementById('handCanvas');
@@ -228,9 +229,6 @@ initMediaPipe(handCanvasEl);
 
 // =============================================================
 // GAME LOOP
-// requestAnimationFrame keeps this running at ~60fps.
-// The loop is always running — game state controls what happens
-// each frame rather than starting/stopping the loop.
 // =============================================================
 
 function loop() {
@@ -243,46 +241,54 @@ loop();
 
 
 // =============================================================
-// UPDATE — called every frame
-// Dispatches to the correct logic based on current gameState.
+// UPDATE
 // =============================================================
 
 function update() {
   if (gameState === 'paused' || gameState === 'login') return;
 
-  // Camera always follows car regardless of state
+  // ── Smooth FOV transition — every frame regardless of state ──
+  if (Math.abs(camera.fov - targetFOV) > 0.1) {
+    camera.fov += (targetFOV - camera.fov) * 0.06;
+    camera.updateProjectionMatrix();
+  }
+
+  // ── Speed lerp — runs in ALL states except paused/login ──
+  // This means the car smoothly decelerates even while a popup
+  // is open, and re-accelerates as soon as the popup closes.
+  const lerpRate = targetSpeed > currentSpeed ? LERP_ACCEL : LERP_DECEL;
+  currentSpeed  += (targetSpeed - currentSpeed) * lerpRate;
+  if (Math.abs(currentSpeed - targetSpeed) < 0.001) currentSpeed = targetSpeed;
+
+  // ── Speed gesture polling — runs in ALL states except paused/login ──
+  // This is the fix: FAST and SLOW are readable at any time,
+  // including during stuck, lanePrompt, and difficulty states.
+  // checkSpeedGesture uses its own confidence counter so it never
+  // interferes with obstacle sign matching in checkGesture.
+  // We skip 'startSign' only because the player hasn't begun
+  // driving yet and the speed system isn't meaningful there.
+  if (gameState !== 'startSign') {
+    const speedGesture = checkSpeedGesture();
+    if (speedGesture === 'fast' && speedMode !== 'fast') {
+      activateFastMode();
+    } else if (speedGesture === 'slow' && speedMode === 'fast') {
+      activateSlowMode();
+    }
+  }
+
+  // Camera always follows car
   updateCamera(camera, carGroup);
 
-  if (gameState === 'startSign') {
-    handleStartSign();
-    return;
-  }
-
-  if (gameState === 'playing') {
-    handlePlaying();
-    return;
-  }
-
-  if (gameState === 'stuck') {
-    handleStuck();
-    return;
-  }
-
-  if (gameState === 'lanePrompt') {
-    handleLanePrompt();
-    return;
-  }
-
-  if (gameState === 'difficulty') {
-    handleDifficulty();
-    return;
-  }
+  if (gameState === 'startSign') { handleStartSign();  return; }
+  if (gameState === 'playing')   { handlePlaying();    return; }
+  if (gameState === 'stuck')     { handleStuck();      return; }
+  if (gameState === 'lanePrompt'){ handleLanePrompt(); return; }
+  if (gameState === 'difficulty'){ handleDifficulty(); return; }
 }
 
 
 // =============================================================
 // handleStartSign
-// Waits for the player to sign PLAY before starting the game.
 // =============================================================
 
 function handleStartSign() {
@@ -293,7 +299,8 @@ function handleStartSign() {
     setTimeout(function() {
       hideAllPopups();
       hideHandCanvas();
-      gameState = 'playing';
+      gameState        = 'playing';
+      drivingStartTime = Date.now();  // start the speed prompt countdown
     }, 700);
   } else {
     setSignResult('Sign PLAY.', false);
@@ -303,22 +310,47 @@ function handleStartSign() {
 
 // =============================================================
 // handlePlaying
-// Normal gameplay: scroll road, move car, spawn and move
-// obstacles, check collision and spawn triggers.
+// Normal gameplay loop. Also handles:
+//   - Smooth speed lerp each frame
+//   - Speed gesture polling (never blocks gameplay)
+//   - Speed prompt timing (2.5s after driving starts)
+//   - Camera shake at fast speed
+//   - Fog compression at fast speed (world feels closer/faster)
 // =============================================================
 
 function handlePlaying() {
-  // Scroll road tiles
-  updateRoad(roadTiles, ROAD_SPEED);
+  // ── Speed prompt — 2.5s after driving starts, shown once ──
+  if (!speedPromptShown && Date.now() - drivingStartTime > 2500) {
+    speedPromptShown = true;
+    showSpeedPrompt();
+    // Auto-dismiss after 5 seconds if player doesn't act on it
+    setTimeout(function() {
+      if (!speedPromptDismissed) {
+        speedPromptDismissed = true;
+        hideSpeedPrompt();
+      }
+    }, 5000);
+  }
 
-  // Move car with arrow keys
+  // ── Visual effects scale with speed ─────────────────────
+  // Fog end distance compresses as speed increases — world appears
+  // to rush by faster even though it's just geometry getting closer.
+  const speedRatio  = (currentSpeed - SPEED_NORMAL) / (SPEED_FAST - SPEED_NORMAL);
+  const fogFar      = THREE.MathUtils.lerp(130, 70, speedRatio);
+  scene.fog.far     = fogFar;
+
+  // Camera shake — subtle random Y offset at fast speed
+  // Magnitude scales with how close we are to SPEED_FAST
+  shakeAmount = speedRatio * 0.04;
+  camera.position.y += (Math.random() - 0.5) * shakeAmount;
+
+  // ── Normal gameplay ──────────────────────────────────────
+  updateRoad(roadTiles, currentSpeed);
   updateCar(carGroup, keys, false);
+  distance += currentSpeed;
+  updateHUD(score, distance, currentSpeed > SPEED_NORMAL + 0.02 ? 2 : 1);
 
-  // Advance distance counter
-  distance += ROAD_SPEED;
-  updateHUD(score, distance);
-
-  // Flash timer countdown for mud pre-flash
+  // Flash timer for mud pre-flash
   if (flashActive) {
     flashTimer--;
     if (flashTimer <= 0) {
@@ -327,13 +359,11 @@ function handlePlaying() {
     }
   }
 
-  // Spawn first obstacle after warm-up distance
   if (!isObstacleActive() && distance > 300) {
     triggerSpawn();
   }
 
-  // Scroll active obstacle and check for events
-  const event = updateObstacles(ROAD_SPEED);
+  const event = updateObstacles(currentSpeed);
 
   if (event === 'lanePrompt') {
     gameState = 'lanePrompt';
@@ -353,7 +383,6 @@ function handlePlaying() {
     clearActiveObstacle(scene);
     setWaiting(false);
 
-    // After enough obstacles passed, ask about difficulty
     if (!askedForMore && mudAvoidedCount >= 4) {
       askedForMore = true;
       gameState    = 'difficulty';
@@ -364,7 +393,6 @@ function handlePlaying() {
     setTimeout(triggerSpawn, 2000);
   }
 
-  // Direct collision fallback (in case challenge_zone was missed)
   if (checkCollision(carGroup)) {
     triggerStuck();
   }
@@ -372,10 +400,46 @@ function handlePlaying() {
 
 
 // =============================================================
+// activateFastMode
+// Called once when FAST gesture is confirmed.
+// Sets target speed to 2x, updates visual systems,
+// dismisses the speed prompt banner if still visible.
+// =============================================================
+
+function activateFastMode() {
+  speedMode    = 'fast';
+  targetSpeed  = SPEED_FAST;
+  targetFOV    = FOV_FAST;
+
+  // Dismiss the prompt if it's still showing
+  if (!speedPromptDismissed) {
+    speedPromptDismissed = true;
+    hideSpeedPrompt();
+  }
+
+  // Show the SLOW hint so the player knows how to ease off
+  showSlowHint();
+}
+
+
+// =============================================================
+// activateSlowMode
+// Returns to normal speed. Hides the slow hint.
+// Fog and FOV lerp back automatically each frame.
+// =============================================================
+
+function activateSlowMode() {
+  speedMode   = 'normal';
+  targetSpeed = SPEED_NORMAL;
+  targetFOV   = FOV_NORMAL;
+  hideSlowHint();
+}
+
+
+// =============================================================
 // handleStuck
 // Popup is open. Road and car are frozen.
-// Checks for gesture input each frame for signIt obstacles.
-// Choice obstacles are handled via keyboard in initUI callbacks.
+// Speed is reset to normal while stuck — fair for all obstacles.
 // =============================================================
 
 function handleStuck() {
@@ -387,7 +451,6 @@ function handleStuck() {
     setSignResult('Great signing!', true);
     resetGestureState();
 
-    // For toll open, start gate animation before resolving
     if (type.id === 'tollOpen') {
       openTollGate();
       setTimeout(function() { resolveObstacle(true); }, 900);
@@ -402,8 +465,6 @@ function handleStuck() {
 
 // =============================================================
 // handleLanePrompt
-// Barricade is approaching — player signs LEFT or RIGHT.
-// Car jumps sideways then the popup closes.
 // =============================================================
 
 function handleLanePrompt() {
@@ -441,8 +502,6 @@ function finishLanePrompt() {
 
 // =============================================================
 // handleDifficulty
-// Player signs MORE or NO to choose obstacle difficulty.
-// getDifficultyLocked prevents double-firing.
 // =============================================================
 
 function handleDifficulty() {
@@ -472,7 +531,6 @@ function finishDifficultyPrompt() {
 
 // =============================================================
 // triggerSpawn
-// Picks a random obstacle and starts the pre-flash for mud.
 // =============================================================
 
 function triggerSpawn() {
@@ -481,7 +539,6 @@ function triggerSpawn() {
   const type = spawnObstacle(scene, bonusEnabled);
   if (!type) return;
 
-  // Mud gets a pre-flash banner so player can study the signs
   if (type.id === 'mud') {
     flashActive = true;
     flashTimer  = FLASH_DURATION;
@@ -492,17 +549,16 @@ function triggerSpawn() {
 
 // =============================================================
 // triggerStuck
-// Called when an obstacle's challenge zone is reached.
-// Freezes gameplay and shows the appropriate popup.
+// Resets speed to normal when a popup opens — keeps all
+// obstacle challenges fair regardless of current speed mode.
 // =============================================================
 
 function triggerStuck() {
-  if (gameState === 'stuck') return; // already stuck
+  if (gameState === 'stuck') return;
 
   const type = getActiveObstacleType();
   if (!type) return;
 
-  // Avoid obstacles just clear and respawn — no popup
   if (type.mechanic === 'avoid') {
     score = Math.max(0, score - 5);
     clearActiveObstacle(scene);
@@ -510,6 +566,12 @@ function triggerStuck() {
     setTimeout(triggerSpawn, 1500);
     return;
   }
+
+  // Pause speed while stuck — resume whatever mode was active after resolve
+  targetSpeed  = SPEED_NORMAL;
+  currentSpeed = SPEED_NORMAL;
+  targetFOV    = FOV_NORMAL;
+  scene.fog.far = 130;
 
   gameState   = 'stuck';
   flashActive = false;
@@ -526,19 +588,26 @@ function triggerStuck() {
 
 // =============================================================
 // resolveObstacle
-// Called when the player correctly answers a popup challenge.
-// Adds score, clears the obstacle, returns to playing state.
+// Score multiplier: 15pts at fast speed, 10pts at normal.
+// After resolving, speed restores to whatever mode was active.
 // =============================================================
 
 function resolveObstacle(correct) {
-  if (correct) score += 10;
+  if (correct) {
+    // Award more points when playing at fast speed — earned risk
+    score += speedMode === 'fast' ? 15 : 10;
+  }
 
-  gameState = 'playing';
+  gameState   = 'playing';
   flashActive = false;
   flashTimer  = 0;
   resetGestureState();
   clearActiveObstacle(scene);
   setWaiting(false);
+
+  // Restore speed mode target after popup closes
+  targetSpeed = speedMode === 'fast' ? SPEED_FAST : SPEED_NORMAL;
+  targetFOV   = speedMode === 'fast' ? FOV_FAST   : FOV_NORMAL;
 
   setTimeout(function() {
     hideAllPopups();
