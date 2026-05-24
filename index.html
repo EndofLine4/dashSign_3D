@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>DashSign 3D</title>
+  <style>
+    /* Reset and base — no scrollbars, no white flash */
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a14; overflow: hidden; font-family: 'Trebuchet MS', 'Segoe UI', sans-serif; }
+    canvas { display: block; }
+
+    /* ── Login overlay ── */
+    .login-overlay {
+      position: fixed; inset: 0; z-index: 35;
+      background: rgba(11, 15, 26, 0.72);
+      display: flex; justify-content: center; align-items: center;
+      backdrop-filter: blur(3px);
+    }
+    .login-card {
+      width: 320px; max-width: 92vw;
+      background: linear-gradient(180deg, rgba(36,52,84,0.95), rgba(27,42,65,0.97));
+      border: 2px solid rgba(144,224,239,0.3);
+      border-radius: 18px; padding: 28px 24px;
+      color: #cae9ff; text-align: left;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.55);
+    }
+    .login-card h2 { margin: 0 0 6px; font-size: 28px; color: #f2fbff; text-align: center; }
+    .login-subtitle { margin-bottom: 18px; color: #90e0ef; font-size: 13px; text-align: center; }
+    .login-label { display: block; font-size: 12px; margin-bottom: 5px; color: #d7f3ff; }
+    .login-input {
+      width: 100%; padding: 10px 14px; margin-bottom: 12px;
+      border-radius: 999px; border: 1px solid rgba(144,224,239,0.3);
+      background: rgba(202,233,255,0.95); color: #1b2a41;
+      font-size: 13px; outline: none;
+    }
+    .login-input:focus { border-color: #00b4d8; box-shadow: 0 0 0 2px rgba(0,180,216,0.25); }
+    .login-submit {
+      width: 100%; padding: 11px; border: none; border-radius: 999px;
+      background: linear-gradient(90deg, #1386c6, #00b4d8);
+      color: #effcff; font-weight: bold; cursor: pointer; font-size: 14px;
+    }
+    .login-error { min-height: 18px; color: #ffd3d3; font-size: 12px; margin: 10px 0 0; text-align: center; }
+    .login-demo { margin-top: 12px; color: #b6e8fb; font-size: 11px; line-height: 1.5; text-align: center; }
+
+    /* ── HUD — score and distance pinned top-left ── */
+    #hud {
+      position: fixed; top: 14px; left: 14px; z-index: 30;
+      color: white; font-size: 16px; font-weight: bold;
+      text-shadow: 0 1px 6px rgba(0,0,0,0.9);
+    }
+    #hud span { margin-right: 16px; }
+
+    /* ── Pause button ── */
+    #pauseBtn {
+      position: fixed; top: 14px; left: 160px; z-index: 40;
+      background: rgba(20,20,30,0.85); color: white;
+      border: 1px solid rgba(255,255,255,0.3); border-radius: 8px;
+      padding: 8px 14px; font-weight: bold; cursor: pointer;
+    }
+
+    /* ── Popup overlay — used for choice mode, sign-it mode, difficulty prompt ── */
+    #popup {
+      display: none; position: fixed; top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      background: rgba(8,12,24,0.94); border-radius: 18px;
+      padding: 24px; text-align: center;
+      z-index: 10; border: 1px solid rgba(144,224,239,0.2);
+      box-shadow: 0 12px 48px rgba(0,0,0,0.7);
+    }
+
+    /* Choice mode — three sign images with S/G/P key labels */
+    #choicePrompt { color: white; font-size: 18px; margin: 0 0 16px; }
+    .sign-choices { display: flex; gap: 14px; justify-content: center; }
+    .sign-choice { text-align: center; }
+    .sign-choice img { width: 90px; height: 90px; border-radius: 8px; object-fit: cover; }
+    .sign-key { color: #f5c842; font-size: 20px; font-weight: bold; margin: 6px 0 0; }
+    #choiceFeedback { color: #ff6b6b; font-size: 14px; margin: 12px 0 0; min-height: 20px; }
+
+    /* Sign-it mode — single sign image + webcam feedback */
+    #signItMode { display: none; }
+    #signItPrompt { color: white; font-size: 18px; margin: 0 0 12px; }
+    #signItImage { width: 160px; height: 130px; border-radius: 8px; object-fit: cover; margin-bottom: 12px; }
+    #cameraHint { color: #aaa; font-size: 13px; margin: 0 0 8px; }
+    #signResult { font-size: 14px; color: #f5c842; min-height: 20px; }
+
+    /* ── Webcam video feed (hidden — MediaPipe reads this) ── */
+    #webcam {
+      display: none; position: fixed; bottom: 16px; right: 16px;
+      width: 160px; height: 120px; border-radius: 8px; z-index: 20;
+    }
+
+    /* ── Hand landmark canvas overlay (shown during sign-it mode) ── */
+    #handCanvas {
+      display: none; position: fixed; bottom: 16px; right: 16px;
+      width: 160px; height: 120px; border-radius: 8px;
+      z-index: 21; border: 2px solid rgba(255,255,255,0.8);
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Login screen — shown on load, hidden after correct credentials -->
+  <div id="loginOverlay" class="login-overlay">
+    <div class="login-card">
+      <h2>DashSign</h2>
+      <p class="login-subtitle">Sign language driving game</p>
+      <label for="loginName" class="login-label">Username</label>
+      <input id="loginName" class="login-input" type="text" autocomplete="username" />
+      <label for="loginPassword" class="login-label">Password</label>
+      <input id="loginPassword" class="login-input" type="password" autocomplete="current-password" />
+      <button id="loginSubmit" class="login-submit">Login</button>
+      <p id="loginError" class="login-error"></p>
+      <p class="login-demo">Demo login: Chloe / Uncharted</p>
+    </div>
+  </div>
+
+  <!-- HUD pinned to top-left — score and distance -->
+  <div id="hud">
+    <span id="scoreDisplay">Score: 0</span>
+    <span id="distDisplay">Dist: 0m</span>
+  </div>
+
+  <!-- Pause button -->
+  <button id="pauseBtn">Pause</button>
+
+  <!-- Popup overlay — choice mode and sign-it mode share this container -->
+  <div id="popup" style="width:340px;">
+
+    <!-- Choice mode: three sign images, player presses S / G / P -->
+    <div id="choiceMode">
+      <p id="choicePrompt"></p>
+      <div class="sign-choices">
+        <div class="sign-choice">
+          <img id="signA" src="" alt="Sign option S">
+          <p class="sign-key">S</p>
+        </div>
+        <div class="sign-choice">
+          <img id="signB" src="" alt="Sign option G">
+          <p class="sign-key">G</p>
+        </div>
+        <div class="sign-choice">
+          <img id="signC" src="" alt="Sign option P">
+          <p class="sign-key">P</p>
+        </div>
+      </div>
+      <p id="choiceFeedback"></p>
+    </div>
+
+    <!-- Sign-it mode: show target sign, player signs to camera -->
+    <div id="signItMode">
+      <p id="signItPrompt"></p>
+      <img id="signItImage" src="" alt="ASL sign to perform">
+      <p id="cameraHint">Show your hand to the camera</p>
+      <div id="signResult"></div>
+    </div>
+
+  </div>
+
+  <!-- Webcam input — hidden, feeds MediaPipe hand tracking -->
+  <video id="webcam" autoplay playsinline></video>
+
+  <!-- Hand landmark overlay — shows yellow dots on player's hand -->
+  <canvas id="handCanvas"></canvas>
+
+  <!-- Three.js from CDN via importmap — no npm or build step needed -->
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.163.0/build/three.module.js"
+      }
+    }
+  </script>
+
+  <!-- MediaPipe hand tracking — must load before main.js -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+
+  <!-- Game entry point -->
+  <script type="module" src="main.js"></script>
+
+</body>
+</html>
