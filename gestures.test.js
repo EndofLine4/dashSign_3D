@@ -339,3 +339,64 @@ describe('gesturePlay', function() {
   });
 
 });
+
+
+// ── FAST ────────────────────────────────────────────────────
+describe('gestureFast', function() {
+  it('detects index and middle extended in a V shape', function() {
+    const lm = makeLandmarks();
+    lm[8].y  = 0.15; lm[6].y  = 0.50; // index extended
+    lm[12].y = 0.15; lm[10].y = 0.50; // middle extended
+    lm[16].y = 0.85; lm[14].y = 0.50; // ring curled
+    lm[20].y = 0.85; lm[18].y = 0.50; // pinky curled
+    lm[8].x  = 0.38; // index and middle spread apart (V shape)
+    lm[12].x = 0.62;
+    lm[8].y  = 0.20;
+    lm[12].y = 0.20;
+    expect(gestureFast(lm)).toBe(true);
+  });
+
+  it('rejects when fingers are not spread enough (too close like NO)', function() {
+    const lm = makeLandmarks();
+    lm[8].y  = 0.15; lm[6].y  = 0.50;
+    lm[12].y = 0.15; lm[10].y = 0.50;
+    lm[16].y = 0.85; lm[14].y = 0.50;
+    lm[20].y = 0.85; lm[18].y = 0.50;
+    lm[8].x  = 0.50; // index and middle very close — this is NO not FAST
+    lm[12].x = 0.53;
+    lm[8].y  = 0.15;
+    lm[12].y = 0.17;
+    expect(gestureFast(lm)).toBe(false);
+  });
+
+  it('rejects GO gesture (only index extended)', function() {
+    const lm = makeLandmarks();
+    extendIndexOnly(lm);
+    expect(gestureFast(lm)).toBe(false);
+  });
+});
+
+
+// ── SLOW ────────────────────────────────────────────────────
+describe('gestureSlow', function() {
+  it('detects open hand held low in frame (wrist y > 0.52)', function() {
+    const lm = makeLandmarks();
+    extendAllFingers(lm);
+    lm[0].y = 0.65; // wrist low in frame
+    expect(gestureSlow(lm)).toBe(true);
+  });
+
+  it('rejects open hand held high (wrist y < 0.52) — that is STOP not SLOW', function() {
+    const lm = makeLandmarks();
+    extendAllFingers(lm);
+    lm[0].y = 0.30; // wrist high — STOP position
+    expect(gestureSlow(lm)).toBe(false);
+  });
+
+  it('rejects curled hand even when held low', function() {
+    const lm = makeLandmarks();
+    curlAllFingers(lm);
+    lm[0].y = 0.70;
+    expect(gestureSlow(lm)).toBe(false);
+  });
+});
