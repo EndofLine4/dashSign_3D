@@ -98,10 +98,17 @@ export function showSpeedPrompt() {
   if (!speedPromptEl) return;
 
   speedPromptEl.innerHTML =
-    '<strong>Sign FAST</strong> to speed up!<br>' +
+    '<strong style="color:#f5c842;font-size:15px;">Sign FAST</strong>' +
+    '<span style="color:white;font-size:13px;"> to speed up</span><br>' +
     '<img src="signs/sign_fast.png" style="width:64px;height:64px;' +
-    'border-radius:6px;object-fit:cover;margin-top:8px;" alt="FAST sign">' +
-    '<br><span style="font-size:11px;color:#aaa;">Sign SLOW any time to ease off</span>';
+    'border-radius:6px;object-fit:cover;margin:8px 4px 0;" alt="FAST sign">' +
+    '<hr style="border:none;border-top:1px solid rgba(255,255,255,0.15);margin:10px 0;">' +
+    '<strong style="color:#90e0ef;font-size:15px;">Sign SLOW</strong>' +
+    '<span style="color:white;font-size:13px;"> to slow down</span><br>' +
+    '<img src="signs/sign_slow.png" style="width:64px;height:64px;' +
+    'border-radius:6px;object-fit:cover;margin:8px 4px 0;" alt="SLOW sign">' +
+    '<br><span style="font-size:11px;color:#aaa;margin-top:6px;display:block;">' +
+    'Both work at any time while driving</span>';
 
   // Slide in
   speedPromptEl.style.opacity   = '0';
@@ -345,27 +352,30 @@ function createSpeedUI() {
   document.body.appendChild(speedPromptEl);
 
   // ── Slow hint — bottom-left, visible while fast ──
+  // Larger and more prominent than before so it's impossible to miss
   slowHintEl = document.createElement('div');
   Object.assign(slowHintEl.style, {
     position:     'fixed',
-    bottom:       '16px',
+    bottom:       '20px',
     left:         '14px',
     zIndex:       '38',
     display:      'none',
     alignItems:   'center',
-    gap:          '10px',
-    background:   'rgba(8,12,24,0.82)',
-    border:       '1px solid rgba(144,224,239,0.25)',
-    borderRadius: '10px',
-    padding:      '10px 14px',
-    color:        '#90e0ef',
-    fontSize:     '13px',
-    fontFamily:   'Trebuchet MS, sans-serif'
+    gap:          '12px',
+    background:   'rgba(8,12,24,0.92)',
+    border:       '1px solid rgba(144,224,239,0.5)',
+    borderRadius: '12px',
+    padding:      '12px 16px',
+    color:        'white',
+    fontSize:     '15px',
+    fontFamily:   'Trebuchet MS, sans-serif',
+    boxShadow:    '0 4px 20px rgba(0,0,0,0.6)'
   });
   slowHintEl.innerHTML =
-    '<img src="signs/sign_slow.png" style="width:40px;height:40px;' +
-    'border-radius:5px;object-fit:cover;" alt="SLOW sign">' +
-    '<span>Sign <strong>SLOW</strong> to ease off</span>';
+    '<img src="signs/sign_slow.png" style="width:52px;height:52px;' +
+    'border-radius:6px;object-fit:cover;" alt="SLOW sign">' +
+    '<div><strong style="color:#90e0ef;display:block;margin-bottom:2px;">Sign SLOW</strong>' +
+    '<span style="font-size:12px;color:#aaa;">to ease off the speed</span></div>';
   document.body.appendChild(slowHintEl);
 
   // ── Speed badge — lives in the HUD div ──
